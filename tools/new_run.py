@@ -8,6 +8,7 @@ ends loses nothing.
 
     python3 tools/new_run.py LIN-1847
     python3 tools/new_run.py LIN-1847 --ticket ticket.txt    seed the summary, suggest areas
+    python3 tools/new_run.py LIN-1847 --ticket -             ... from stdin, for a scrape
     python3 tools/new_run.py LIN-1847 --area "Pin"           seed 03-coverage.md directly
     python3 tools/new_run.py LIN-1847 --area "Pin" --full    include steps in the coverage dump
 
@@ -45,7 +46,9 @@ conversation.
 - **New functionality, or a change to existing code?**
   (This decides whether we *add* cases. It never decides whether we test — the floor is
   always a scoped pass on the area that changed.)
-- **Platforms:** Android / iOS / both
+- **Platforms (OS):** Android / iOS / both — verbatim from the ticket, never inferred
+- **Config:** phone / tablet / a named device profile, or "not stated — ask"
+- **Backend:** reference-qa / staging / production, or "not stated — ask"
 - **Remote config flag:** name and state, or "none" — record it either way
 - **Release introduced:**
 - **Risk — what nearby behavior could this plausibly disturb:**
@@ -106,10 +109,13 @@ def main(argv):
 
     ticket_text = ""
     if ticket_file:
-        if not os.path.isfile(ticket_file):
+        if ticket_file == "-":
+            ticket_text = sys.stdin.read()
+        elif os.path.isfile(ticket_file):
+            ticket_text = open(ticket_file, encoding="utf-8").read()
+        else:
             print(f"No such file: {ticket_file}")
             return 1
-        ticket_text = open(ticket_file, encoding="utf-8").read()
         out = subprocess.run(
             [sys.executable, os.path.join(HERE, "coverage.py"), "suggest",
              ticket_text, "--limit", "8"],

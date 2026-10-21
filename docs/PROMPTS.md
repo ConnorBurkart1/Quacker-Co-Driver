@@ -13,6 +13,26 @@ Refresh at the start of a ticket. Every answer prints its source and age on line
 
 ---
 
+## Starting from a ticket
+
+> Scrape QA-276 and start a run.
+
+> Pull GRP-3163 — I want the comments and the linked PR, not just the description.
+
+Pasting still works and is the fallback until Linear access lands:
+
+```
+pbpaste | python3 tools/new_run.py QA-276 --ticket -     # Mac
+python3 tools/new_run.py QA-276 --ticket ticket.txt
+```
+
+Either way the job is the same: fill in the **Structured** block of `01-summary.md`. The
+raw ticket is only half of it — the other half is what got decided, what was rejected, and
+what nobody knows yet. Everything downstream reads that file, so a correction made there
+propagates instead of being re-explained.
+
+> The summary says the backend is unknown — that's reference-qa. Fix it and redo the cases.
+
 ## Starting a ticket
 
 > What covers the HOS card, and is any of it at risk if we change how the clock banner renders?

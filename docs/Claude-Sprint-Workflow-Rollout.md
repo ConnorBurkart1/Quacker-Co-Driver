@@ -369,13 +369,47 @@ and we can say by how much.
 
 ### Stage C — Access, read-only *(one small ask)*
 
-**Build:** nothing. Authorize the two MCP connectors read-only, add the allowlist rules.
+**Half done.** Splitting it by system turned out to matter, because the two halves needed completely
+different things.
 
-**What Connor does:** stops pasting. `/sprint LIN-1847` reads the ticket itself and checks coverage
-against live Testmo instead of a stale export.
+**Testmo — done.** Not through the MCP connector, which we were never invited to, but through the
+REST API with a token in `.env`. That turned out to be the better answer anyway: REST puts the verb
+in the HTTP method, so a `GET`-only allowlist line enforces read-only *at the network boundary*. MCP
+is JSON-RPC over a single endpoint with the verb in the request body, which the proxy cannot see
+into. There is no read-only token tier in Testmo, so that one allowlist line is the entire
+enforcement — which is why `refresh.py` issues GET only and the allowlist carries no write method.
 
-**What it buys:** the paste step and the staleness caveat. Small in isolation — but it's what turns
-three skills into one command, which is the whole user-experience thesis.
+**Linear — outstanding, and it's one line.** Two independent locks, both on Linear's side: the
+read-only endpoint, which only ever exposes read tools, and a personal API key restricted to `Read`
+and to selected teams. Not OAuth — dynamic client registration wants an interactive browser the VM
+doesn't have, and several more allowlist entries. A bearer key needs one:
+
+```
+POST https://mcp.linear.app/mcp/readonly
+```
+
+POST is how MCP talks, not a write — every JSON-RPC message goes as a POST body to the one endpoint.
+Which is the whole reason the locks have to be Linear's rather than the proxy's. Setup, and the
+verification that turns "Linear says it's read-only" into something observed, in
+`docs/LINEAR-SETUP.md`.
+
+**Build:** the `ticket-scrape` skill — written, and useful before the access lands.
+
+**What Connor does:** names a ticket. Stops pasting, once the rule is in.
+
+**What it buys — and it is not the paste.** Pasting is ten seconds. Two things are worth having:
+
+1. **Everything in Linear that isn't in the description box.** Comments especially: QA-276's body
+   says *"UI for where the button lives PENDING"*, and in a ticket that old it is near-certain that
+   somebody settled it in a comment. Drafting off the body alone writes cases against a screen that
+   may not exist. Labels carry platform tags, the project resolves **Release Introduced**, and the
+   linked PR is the only honest signal of what code actually changed.
+2. **The Structured block gets filled in.** On both practice runs it was left blank and drafting
+   worked straight off the raw ticket. That works — and it throws away every decision made along the
+   way. Nothing recorded which areas were rejected, whether a flag was checked, or what nobody knew.
+   Both practice summaries have now been backfilled, and the open-questions list each one produced is
+   the most useful thing in the folder: QA-276's says *case 2 is not executable until someone defines
+   "IA"*, which is a blocker worth knowing before a tester picks it up, not after.
 
 **Why here:** it's the first thing that needs permission from anyone else, and by this point there's
 something working to point at when asking. Asking for read-only access to show a working thing is a
