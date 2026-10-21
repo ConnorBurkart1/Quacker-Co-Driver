@@ -56,6 +56,36 @@ method. Never add one.
 
 Flags: `--all` (include retired), `--os Android|iOS`, `--limit N`, `--full` (show steps).
 
+## Never answer "uncovered" from `area` alone
+
+**This is the most expensive mistake this skill can make, and it has been made.** On the
+QA-541 run, a coverage review built from three `area` calls concluded that an acceptance
+criterion was uncovered and a case was drafted for it. It was covered — by **twelve** cases
+in two areas the review never looked at. `search` found them in one call.
+
+The reason is structural. **`area` answers "what is filed here". It cannot answer "what
+tests this".** Anything that is used as a *tool* by other features has its coverage filed
+under its consumers:
+
+| Subject | Filed under | Also tested from |
+|---|---|---|
+| Send Diagnostics (Settings) | `Settings` — 8 cases | Scanning (C815193), Dashboard (C770083–C770093) — 12 more |
+
+So, before writing the word *uncovered*, *gap*, or *nothing asserts*:
+
+```
+python3 tools/coverage.py search "<the control's shipped name>"
+```
+
+**Search by the shipped name, not the ticket's name.** QA-541 called the button "Report
+Issue"; the product calls it "Send Diagnostics". The two searches return different sets, and
+only one of them is the truth. If the ticket's wording returns little, that is a signal the
+feature was renamed — go find the real name in the area dump and search again.
+
+A claim that something is uncovered is the single highest-cost output of this skill: it is
+what causes new cases to be written. **Treat it as the claim that needs the most evidence,
+not the least.**
+
 ## How to read the data — five things that will make you wrong if you skip them
 
 **1. Folders are a tree; the area is the leaf.** Paths look like

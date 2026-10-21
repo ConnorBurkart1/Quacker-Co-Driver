@@ -7,6 +7,7 @@ corrects it by editing a file rather than re-explaining in a conversation. A ses
 ends loses nothing.
 
     python3 tools/new_run.py LIN-1847
+    python3 tools/new_run.py LIN-1847 --linear               fetch the ticket from Linear
     python3 tools/new_run.py LIN-1847 --ticket ticket.txt    seed the summary, suggest areas
     python3 tools/new_run.py LIN-1847 --ticket -             ... from stdin, for a scrape
     python3 tools/new_run.py LIN-1847 --area "Pin"           seed 03-coverage.md directly
@@ -24,6 +25,76 @@ import os
 import subprocess
 import sys
 from datetime import date
+
+Q_FETCH = """
+query($id: String!) {
+  issue(id: $id) {
+    identifier title description url createdAt updatedAt
+    state { name } labels { nodes { name } } project { name } team { key }
+    assignee { name } creator { name } parent { identifier title }
+    children { nodes { identifier title } }
+    attachments { nodes { title url } }
+    relations { nodes { type relatedIssue { identifier title } } }
+    comments { nodes { body createdAt user { name } } }
+  }
+}"""
+
+
+def fetch_from_linear(ticket):
+    """Pull a ticket over the GraphQL API and render it the way a scrape should.
+
+    This exists because the API is now reachable. The earlier rule — 'the fetch is the
+    model's job' — was about MCP, which only a model client can speak. A GraphQL call is
+    deterministic and belongs in tools/ like every other fact-gathering step.
+
+    Records negatives explicitly: 'Comments: NONE' is a finding, a blank line is not.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import review_sync
+    issue = review_sync.gql(Q_FETCH, {"id": ticket})["issue"]
+    if not issue:
+        sys.exit(f"Linear has no issue {ticket} — or the key cannot see its team.")
+
+    def names(node, key="name"):
+        return [n[key] for n in issue[node]["nodes"]] if issue.get(node) else []
+
+    comments = issue["comments"]["nodes"]
+    atts = issue["attachments"]["nodes"]
+    rels = issue["relations"]["nodes"]
+    kids = issue["children"]["nodes"]
+    out = [issue["title"], "",
+           "[Linear metadata — fetched over the API, not present in a paste]",
+           f"- Identifier: {issue['identifier']}",
+           f"- URL: {issue['url']}",
+           f"- Status: {issue['state']['name']} / Team: {issue['team']['key']}",
+           f"- Labels: {', '.join(names('labels')) or 'NONE'}",
+           f"- Project: {(issue.get('project') or {}).get('name', 'none')}",
+           f"- Created by: {(issue.get('creator') or {}).get('name', '?')}"
+           f" on {issue['createdAt'][:10]} / Updated: {issue['updatedAt'][:10]}",
+           f"- Assignee: {(issue.get('assignee') or {}).get('name', 'none')}"]
+    if issue.get("parent"):
+        out.append(f"- Parent: {issue['parent']['identifier']} "
+                   f"{issue['parent']['title']!r}")
+    out.append("- Sub-issues: " + (", ".join(
+        f"{k['identifier']} {k['title']!r}" for k in kids) if kids else "NONE"))
+    out.append("- Attachments: " + (", ".join(
+        f"{a['title']} <{a['url']}>" for a in atts) if atts else "NONE"))
+    out.append("- Relations: " + (", ".join(
+        f"{r['type']} {r['relatedIssue']['identifier']}" for r in rels)
+        if rels else "NONE"))
+    out.append(f"- Comments: {len(comments) or 'NONE'}"
+               + (" — reproduced below" if comments else " (checked, there are none)"))
+    out += ["", "---", "", (issue.get("description") or "(no description)").strip()]
+    if comments:
+        out += ["", "---", "", "### Comments, oldest first"]
+        for c in comments:
+            who = (c.get("user") or {}).get("name", "unknown")
+            out += ["", f"**{who}** — {c['createdAt'][:16].replace('T', ' ')}", "",
+                    c["body"].strip()]
+    print(f"  fetched {issue['identifier']} from Linear — "
+          f"{len(comments)} comment(s), {len(atts)} attachment(s), "
+          f"{len(kids)} sub-issue(s)")
+    return "\n".join(out) + "\n"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)          # repo root: .env, the cache and runs/ live here
@@ -100,6 +171,9 @@ def main(argv):
             ticket_file = argv[i + 1]
     full = "--full" in argv
 
+    if "--linear" in argv and not ticket_file:
+        ticket_file = None  # handled below; keeps the candidate-scoring path alive
+
     folder = os.path.join(RUNS, ticket)
     if os.path.isdir(folder):
         print(f"{folder} already exists — leaving it alone.")
@@ -108,7 +182,10 @@ def main(argv):
     os.makedirs(folder)
 
     ticket_text = ""
-    if ticket_file:
+    if "--linear" in argv:
+        ticket_text = fetch_from_linear(ticket)
+        ticket_file = ticket_file or "linear"
+    if ticket_file and not ticket_text:
         if ticket_file == "-":
             ticket_text = sys.stdin.read()
         elif os.path.isfile(ticket_file):
@@ -116,6 +193,11 @@ def main(argv):
         else:
             print(f"No such file: {ticket_file}")
             return 1
+
+    # Score candidates from whatever text we ended up with, whether it came off disk,
+    # off stdin or off the Linear API. This used to live inside the file-reading branch,
+    # so --linear produced a run folder with no 00-candidates.md at all.
+    if ticket_text:
         out = subprocess.run(
             [sys.executable, os.path.join(HERE, "coverage.py"), "suggest",
              ticket_text, "--limit", "8"],

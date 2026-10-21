@@ -8,9 +8,35 @@ description: Read a Linear ticket and turn it into a filled-in run summary — t
 Stage C of the sprint loop: a ticket ID goes in, a **filled-in** `01-summary.md` comes out.
 
 ```
-python3 tools/new_run.py QA-276 --ticket -     # ticket text on stdin
-python3 tools/new_run.py QA-276 --ticket ticket.txt
+python3 tools/new_run.py QA-541 --ticket fetched.txt
+python3 tools/new_run.py QA-541 --ticket -      # or on stdin
 ```
+
+**The fetch is your job, not the script's.** `new_run.py` takes ticket *text*; it has no
+network and cannot reach Linear. The MCP server lives in the Claude Code session, so the
+sequence is always: you call the Linear tools, you write what comes back to a file, you
+pass that file to `--ticket`. There is no `--linear` flag and there should not be one — a
+deterministic script in `tools/` should not depend on which model is driving it.
+
+### The fetch, in order
+
+1. `get_issue` with an explicit `fields` list — at minimum `title, description, url,
+   status, labels, project, team, assignee, createdBy, createdAt, updatedAt`, plus
+   `attachments` and `relations` with `includeRelations: true`.
+2. `list_comments` for that issue. **Always, even when you expect none.**
+3. Write a header block of the Linear metadata, then `---`, then the description verbatim.
+4. `new_run.py <TICKET> --ticket <that file>`.
+
+**Record negatives explicitly.** Write `Comments: NONE (0 — checked via list_comments)`,
+not nothing. A blank field means "not looked at"; this file is read later by someone who
+cannot tell the difference. The same goes for `attachments`, `relations` and linked PRs.
+
+### What the key actually reaches
+
+`Read`-scoped and restricted to the **`QA` team only** — and `QA` is the onboarding team,
+not product engineering. `list_teams` returns exactly one team. A ticket on **GRP, DRI,
+BUG or EIN** errors with `Could not find referenced Issue`; that is the scoping working,
+not a broken server. Those tickets use the paste fallback below.
 
 ## What this stage is actually for
 
@@ -63,6 +89,33 @@ GRP-3163 is the shape to aim at: the ticket is about login, but token rotation t
 **every authenticated request**, so the risk line is the thing that widened the scoped pass
 beyond the login screen.
 
+## Check the coverage repository before you believe a PENDING
+
+**This is the lesson of the QA-541 run, and it is the most expensive mistake this stage can
+prevent.** QA-541's body carries three acceptance criteria marked `PENDING` or `TBD` and
+reads like unbuilt work. All three were already shipped and asserted by existing cases:
+
+| Ticket says | Testmo says |
+|---|---|
+| "UI for where the button lives PENDING" | C18000 — it is in Settings, labelled **"Send Diagnostics"** |
+| "Instructional copy TBD" | C330662 — the copy is shipped and asserted verbatim |
+| "Toast message TBD (include offline)" | C330659 "A report has been generated"; C330663, C18003 for offline |
+
+The ticket also used a name the product does not: **"Report Issue"** vs the shipped **"Send
+Diagnostics"**. Searching the repository for the ticket's wording finds nothing; searching
+for the *behavior* finds thirteen cases.
+
+So: **a `PENDING` in the ticket is a question about the ticket, not a fact about the app.**
+Before recording one as an open question, run `coverage.py area` on the area you landed on
+and read the case titles. A ticket old enough to have unresolved ACs is old enough for the
+feature to have shipped underneath it. Both practice tickets so far were this shape.
+
+**Corollary for `00-candidates.md`:** it ranked Settings nowhere in its top eight on QA-541,
+and failed the same way on QA-276. Both tickets carry long implementation appendices
+(payload shapes, repo links, curl commands) that outweigh the two sentences describing the
+feature. **Treat the scored candidates as evidence that can be wrong**, and when the top
+hits look like noise, go find the area by name instead.
+
 ## Rules that are not style
 
 - **Quote acceptance criteria, don't paraphrase them.** A paraphrased AC becomes a case
@@ -98,6 +151,7 @@ POST https://mcp.linear.app/mcp/readonly
 
 One line — POST is how MCP talks, not a write. Full setup in `docs/LINEAR-SETUP.md`.
 
-Until that lands, the fallback is the one that has been used for every run so far, and it
-loses nothing except the comments and the links: paste the ticket into a file and pass
-`--ticket`. **Fill in the Structured block either way** — that half needs no network.
+The same fallback covers any ticket outside the `QA` team, which the key cannot reach by
+design: paste the ticket into a file and pass `--ticket`. **Fill in the Structured block
+either way** — that half needs no network, and on the evidence so far it is where most of
+the value is.

@@ -1,4 +1,4 @@
-# Handoff — state as of 2026-10-21
+# Handoff — state as of 2026-10-21 (Stage C complete, committed)
 
 Written because the sessions that built this repo don't live in it. Read `README.md` first
 for what the thing *is*; this file is where it stands, what's half-done, and the traps
@@ -28,8 +28,8 @@ anything where Claude Code actually runs, which is the VM.
 |---|---|
 | **A — the coverage answer** | **Done.** `tools/refresh.py` + `tools/coverage.py` + the `coverage-check` skill |
 | **B — ticket in, cases out** | **Done.** `case-draft` skill, `case-proofer` agent, `validate_cases.py`, run folders. Two practice runs on real old tickets |
-| **C — read-only access** | **Half.** Testmo live; Linear wired but not yet connected — see below |
-| **D — review view** | Not started. Optional by design |
+| **C — read-only access** | **Done.** Testmo live; Linear connected and all five checks verified 2026-10-21 — see below |
+| **D — review view** | **Done differently.** Linear is the review surface — no bespoke UI was built. See below |
 | **E — the device leg** | Not started. Runs on the Mac |
 | **F — evidence view** | Not started |
 | **G — reporting out** | Not started. Write access, one system at a time |
@@ -58,7 +58,7 @@ in about 40s. Steps, Preconditions and Goal come from the CSV export, not the AP
 returns only 9 of template 3's 17 fields — so those three are as old as the last export
 (2026-10-13). Everything else is live.
 
-## Linear — wired, not yet connected
+## Linear — connected and verified 2026-10-21
 
 **Two independent locks, both on Linear's side:**
 
@@ -93,7 +93,7 @@ A bearer key needs one line and no browser.
 
 **That file is finished. It never changes and never holds the key.**
 
-### What is still outstanding (unverified as of 2026-10-21)
+### Setup — all three done, confirmed working 2026-10-21
 
 1. `POST https://mcp.linear.app/mcp/readonly` in `allowlist.txt` **on the host**, next to
    `filter.py`.
@@ -105,7 +105,7 @@ A bearer key needs one line and no browser.
 
 ```bash
 echo 'export LINEAR_API_KEY=lin_api_...' >> ~/.bashrc    # once, in the VM
-cd /home/vm/shared/Dispatch-Co-Driver
+cd /home/vm/shared/Quacker-Co-Driver
 claude
 ```
 
@@ -124,20 +124,39 @@ claude
   Code is concerned, `/mcp` shows only the seven claude.ai connectors, and the UI steers
   you toward the OAuth connector — which is how the trap above gets sprung.
 
-### Verify before trusting it
+### Verified — all five checks passed 2026-10-21
 
 Our server appears as an **eighth** entry named `linear`, separate from `claude.ai Linear`.
 
-- [ ] `/mcp` lists `linear`
-- [ ] **No browser, no consent screen.** That's how you know it's the bearer-key path
-- [ ] Tool list contains **no create/update/delete tools**. If a write tool appears, stop —
-      the endpoint isn't doing what we think
-- [ ] Reading an issue in a team the key doesn't cover **errors**. If it succeeds, the team
-      scoping didn't take
-- [ ] `git grep lin_api_` → nothing
+- [x] `linear` loads as a project MCP server; `claude.ai Linear` stayed on "needs
+      authentication" and was **not** approved
+- [x] **No browser, no consent screen.** The bearer-key path, as intended
+- [x] Tool list is **read-only in full** — every tool is `get_*`, `list_*` or `search_*`.
+      No create, update or delete tool exists on the endpoint
+- [x] **Team scoping took.** `list_teams` returns exactly one team, `QA`. `get_issue
+      GRP-3163` errors with `invalid_request / Could not find referenced Issue`
+- [x] `git grep lin_api_` returns only the literal `lin_api_...` placeholder in README,
+      HANDOFF and LINEAR-SETUP. No real key is tracked
 
-The second, third and fourth turn "Linear says it's read-only and team-scoped" into
-something observed rather than assumed.
+Reads confirmed working against QA-276, QA-541, QA-617, QA-305 and a 50-issue team listing.
+
+### What the key actually reaches — narrower than planned
+
+**One team: `QA`.** And `QA` in Linear is not the product team — it is the **onboarding and
+training team**. Nearly every issue sits in a per-tester project ("Eri Quinonez - Onboarding
+of New tester", "Jawunn Posey: Onboarding of New Tester", "Emily Acuña - Onboarding of New
+Tester"). The product work this repo is meant to serve lives under **GRP, DRI, BUG, EIN** —
+**none of which the key can see.**
+
+Consequences, measured rather than assumed:
+
+- **GRP-3163 cannot be scraped.** One of the two practice runs is out of reach entirely.
+- **The three benefits claimed below did not materialise for QA-276** — see the correction
+  in that section.
+
+**This is the open decision for Connor:** widen the key's team scope to the product teams,
+or accept that Linear access only covers QA-team tickets. The comments, PRs and releases the
+Stage C case was built on live on the teams the key can't currently reach.
 
 ### Possible blockers
 
@@ -148,24 +167,110 @@ never exceeds its creator's access. One auth session is one workspace.
 
 Pasting is ten seconds. Two things are worth having:
 
-1. **Everything in Linear that isn't the description box.** Comments especially: QA-276's
-   body says *"UI for where the button lives PENDING"* and on a ticket that old somebody
-   almost certainly settled it in a comment. Labels carry platform tags, the project
-   resolves **Release Introduced**, the linked PR is the only honest signal of what code
-   actually changed.
+1. ~~**Everything in Linear that isn't the description box.**~~ **Checked 2026-10-21 —
+   this did not hold for QA-276.** Each of the three claims failed against the real ticket:
+
+   - **Comments:** QA-276 has **zero**. So do QA-541, QA-617 and QA-305. This QA team does
+     not use comments. *"UI for where the button lives PENDING"* was never settled anywhere
+     in Linear — it still reads PENDING on the live twin nine months later.
+   - **Project resolves Release Introduced:** no. Projects here are per-tester onboarding
+     projects, not releases. **Release Introduced is still unknown.**
+   - **The linked PR:** `attachments` is empty and `relations` is empty on QA-276. There is
+     no linked PR.
+
+   What Linear *did* give that the paste did not: the `Android` label confirmed as the only
+   platform tag, `Done` / `completedAt 2026-10-19`, and — the one genuinely valuable find —
+   **QA-541**.
 2. **The Structured block getting filled in.** On both practice runs it was left blank and
    drafting read the raw body — losing every decision made along the way. Both were
    backfilled 2026-10-21; the open-questions lists are now the most useful thing in each
-   folder.
+   folder. **This one holds** — and it never depended on Linear access.
+
+### QA-276 is a stale copy. QA-541 is the live one.
+
+Found by listing the QA team rather than by reading QA-276 itself:
+
+| | QA-276 | QA-541 |
+|---|---|---|
+| Project | Eri Quinonez - Onboarding of New tester | Jawunn Posey: Onboarding of New Tester |
+| Status | Done (completed 2026-10-19) | **Backlog** |
+| Build link | Build 1 | ~~Build 1~~ struck through, **Build 2** |
+| Created | 2026-01-07 | 2026-07-09 |
+
+Same title, same body, same unresolved ACs. **This settles the "re-file or new iteration?"
+question in the open items: neither — it is a training exercise re-filed per onboarding
+tester, and QA-541 is the current instance carrying the current build.**
+
+`runs/QA-276/` therefore points at the superseded copy. If that run is ever executed rather
+than used as practice, it should be repointed at **QA-541 and Build 2**.
 
 Full setup: `docs/LINEAR-SETUP.md`. The skill: `.claude/skills/ticket-scrape/SKILL.md`.
-Until access lands the fallback costs only the comments and the links:
+Access has landed for the `QA` team. For tickets on any other team the paste fallback is
+still the only route:
 
 ```bash
-pbpaste | python3 tools/new_run.py QA-276 --ticket -
+pbpaste | python3 tools/new_run.py GRP-3163 --ticket -
 ```
 
 ---
+
+## Stage C is finished — the loop ran end to end
+
+**QA-642, 2026-10-21.** Ticket fetched from Linear, coverage checked, decision written,
+five cases drafted and proofed, published as sub-issues QA-676–QA-680, reviewed by Connor
+in Linear, one case reworked from comments and renamed in place, all five approved. The
+watcher exited on its own with `ALL CASES APPROVED`.
+
+That meets Stage C's written bar: *one command takes a ticket ID and produces a reviewed
+case set, with no copy-paste.*
+
+### Stage D was answered by Stage C, not built
+
+The rollout planned a bespoke HTML review view. It isn't needed: **Linear is the review
+surface.** Cases are sub-issues; comments are the instruction; status is the verdict. The
+team already works this way — QA-623 has eighteen human-written cases filed as sub-issues.
+Nothing about Stage F (the evidence view) depends on the Stage D generator existing.
+
+### What was added
+
+- `tools/review_sync.py` — `publish`, `poll`, `watch`, `status`, `stage`
+- `.claude/commands/sprint.md` and `rework.md`; `tools/sprint.sh` runs the same thing from
+  a terminal
+- `tools/new_run.py --linear` — fetches the ticket over GraphQL. The old rule "the fetch is
+  the model's job" was about MCP, which only a model client can speak; a GraphQL call is
+  deterministic and belongs in `tools/`
+- `CLAUDE.md` — the operating rules, loaded by any session in this repo
+- `07-questions.md` in a run folder — what the run is blocked on and who owns each answer
+
+### Writes live in the script, not in MCP
+
+`.mcp.json` still points at `/mcp/readonly`, and the agent session holds **no write tool**.
+Every write goes through `review_sync.py` over GraphQL, creating and updating sub-issues of
+one named parent. A model holding `issueCreate` can write anything anywhere; a script does
+a fixed set of operations you can diff. **Don't move writes into MCP to save a step.**
+
+One allowlist line was added: `POST https://api.linear.app/graphql`.
+
+### Bugs found and fixed, worth not re-introducing
+
+- **The comment filter discarded the reviewer's comments.** The key is Connor's, so
+  `viewer` *is* Connor; "ignore my own comments" excluded exactly the ones that mattered.
+  Filter by timestamp; mark anything the script posts with `[co-driver]`.
+- **Renames created duplicates.** The update mutation never sent `title`, and issues were
+  matched *by* title. Titles now update, and a rename is paired by file position with the
+  old and new names printed.
+- **Platform labels are workspace-level**, not team-level, so `team { labels }` returned
+  nothing. Query both.
+- **`--linear` skipped candidate scoring**, so a fetched run had no `00-candidates.md`.
+- **The watch loop wrote and announced an empty rework file every cycle**, burying the real
+  output.
+
+### Still unproven
+
+**The `--on-rework` hook has never fired unattended.** Polling, comment detection, rename
+and republish are all proven; `/rework` running without a human watching is not. To test
+it: leave a *new* comment (a state move alone is correctly ignored) on a case that is not
+already final.
 
 ## Built in the last session
 
@@ -182,6 +287,11 @@ pbpaste | python3 tools/new_run.py QA-276 --ticket -
 ## Open items
 
 **Decisions waiting on Connor:**
+
+- **Widen the Linear key's team scope?** It currently covers `QA` only, which is the
+  onboarding team. The product teams — GRP, DRI, BUG, EIN — are unreachable, and that is
+  where the comments, PRs and releases Stage C was justified on actually live. Keeping the
+  scope tight is a defensible choice; it just means Linear access buys less than planned
 
 - `~/.claude/skills/{coverage-check,case-draft}` and `~/.claude/agents/case-proofer.md` are
   duplicates of the in-repo copies and will drift. Fix is symlinks into the repo — proposed,
@@ -200,10 +310,14 @@ pbpaste | python3 tools/new_run.py QA-276 --ticket -
 
 **Unresolved on the practice tickets:**
 
-- **QA-276** — is it a re-file of shipped work or a new iteration? "IA" is undefined and
-  case 2 isn't executable until someone says what surface support actually uses
+- **QA-276** — ~~re-file or new iteration?~~ **Answered 2026-10-21: an onboarding training
+  exercise, re-filed per tester. QA-541 is the live instance (Build 2).** Still open: **"IA"
+  is undefined** and case 2 isn't executable until someone says what surface support
+  actually uses. Linear did not answer it — there are no comments on the ticket.
+  **Release Introduced is also still unknown**; the project field does not supply it
 - **GRP-3163** — how to provision an account on an old-format token; whether QA verifies
-  token internals; C662431's OS restriction
+  token internals; C662431's OS restriction. **Note: the Linear key cannot reach the GRP
+  team, so this one stays paste-only until the key's scope is widened**
 - **PIN-V2-GAP** — dropped deliberately or missed?
 
 ## The rule that governs all of it
