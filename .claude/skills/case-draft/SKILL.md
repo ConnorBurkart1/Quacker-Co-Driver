@@ -126,10 +126,10 @@ This is the team template, written in the form the validator reads:
   stated value versus which may be anything
 
 ### Steps
-- Log into PINMOVE-1 and wait for sync
-- Put the device in airplane mode
-- Long press a stop pin, drag it, and accept (Result 1)
-- Restore connectivity and reopen the load (Result 2)
+1. Log into PINMOVE-1 and wait for sync
+2. Put the device in airplane mode
+3. Long press a stop pin, drag it, and accept (Result 1)
+4. Restore connectivity and reopen the load (Result 2)
 
 ### Expected Results
 - **Result 1** = The pin shows at the new location and the address updates locally
@@ -144,9 +144,13 @@ engineering rather than guessing.
 Any asset the case needs, saved as a JSON file beside the case.
 ```
 
-**Section order is fixed: Preconditions → Steps → Expected Results → Goals.** Each
-Result is its own bullet with a blank line between, so a tester reading on a phone can
-tell them apart.
+**Section order is fixed: Preconditions → Steps → Expected Results → Goals.**
+
+**Steps are numbered, 1..n, in order.** A tester reports "it failed on step 4" and a
+reviewer asks "what does step 2 assume" — neither works if the steps are bullets. The
+validator treats a bulleted step as an error. Preconditions and Expected Results stay
+bulleted: they are a set, not a sequence. Each Result is its own bullet with a blank line
+between, so a tester reading on a phone can tell them apart.
 
 **Write the fields the way the team writes them. The validator translates to what Testmo
 stores and prints what each one will import as.**

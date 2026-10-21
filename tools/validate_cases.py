@@ -25,7 +25,7 @@ Input format — one case per `## Case:` heading:
     - USER: SOMEUSER
 
     ### Steps
-    - Do the thing (Result 1)
+    1. Do the thing (Result 1)
 
     ### Expected
     Result 1 = The thing happened
@@ -166,9 +166,29 @@ def parse(path):
     return cases
 
 
-def bullets(block):
-    return [l.strip()[1:].strip() for l in block.splitlines()
-            if l.strip().startswith(("-", "*"))]
+STEP_NUM = re.compile(r"^(\d+)[.)]\s+(.*)$")
+
+
+def steps_of(block):
+    """Steps are NUMBERED — '1. Do the thing'. A tester says "it failed on step 4",
+    which only works if the steps have numbers. Preconditions and Expected Results
+    stay bulleted.
+
+    Returns (items, numbers, bulleted_count).
+    """
+    items, numbers, bulleted = [], [], 0
+    for line in block.splitlines():
+        t = line.strip()
+        if not t:
+            continue
+        m = STEP_NUM.match(t)
+        if m:
+            numbers.append(int(m.group(1)))
+            items.append(m.group(2).strip())
+        elif t.startswith(("-", "*")):
+            bulleted += 1
+            items.append(t[1:].strip())
+    return items, numbers, bulleted
 
 
 def check(case, corpus):
@@ -322,10 +342,15 @@ def check(case, corpus):
                               "unspecified account cannot be run")
 
     # --- steps and the Result markers -------------------------------------------
-    steps = bullets(case["steps"])
+    steps, step_nums, bulleted = steps_of(case["steps"])
     if not steps:
         errors.append("no Steps")
-    elif len(steps) > STEP_SOFT_MAX:
+    if bulleted:
+        errors.append(f"{bulleted} step(s) are bulleted — steps are numbered "
+                      "'1.', '2.', '3.' so a tester can say which step failed")
+    elif step_nums and step_nums != list(range(1, len(step_nums) + 1)):
+        errors.append(f"step numbers are not 1..n in order: {step_nums}")
+    if len(steps) > STEP_SOFT_MAX:
         warnings.append(f"{len(steps)} steps; over ~{STEP_SOFT_MAX} usually means "
                         "this is two cases")
 
