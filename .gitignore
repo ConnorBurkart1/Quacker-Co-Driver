@@ -1,0 +1,17 @@
+# Secrets. Holds TESTMO_URL and TESTMO_TOKEN. Never commit this.
+.env
+
+# Generated. ~6.6 MB, rebuilt by `python3 tools/refresh.py` on every pull.
+testmo-cache.json
+testmo-cache.json.tmp
+
+# Per-ticket working state. One person's scratch on one ticket, not shared history.
+runs/*
+!runs/README.md
+
+# Local test case exports
+*.csv
+
+__pycache__/
+*.pyc
+.DS_Store
