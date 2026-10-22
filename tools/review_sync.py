@@ -39,6 +39,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+import ledger
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -322,6 +324,7 @@ def publish(ticket, parent_ref, dry=False):
     existing = {c["title"]: c for c in parent["children"]["nodes"]}
     now = datetime.now(timezone.utc).isoformat()
     created, updated, skipped = [], [], []
+    created_rec = []
 
     if dry:
         print(f"DRY RUN — nothing will be written.\n")
@@ -393,11 +396,17 @@ def publish(ticket, parent_ref, dry=False):
             issue = res["issueCreate"]["issue"]
             iid, ident = issue["id"], issue["identifier"]
             created.append(ident)
+            created_rec.append({"id": iid, "identifier": ident, "name": case["title"]})
         state["cases"][case["title"]] = {
             "id": iid, "identifier": ident, "status": "awaiting", "synced_at": now,
         }
 
     save_state(ticket, state)
+    # The loop is still being debugged, so every created issue goes in the cleanup
+    # ledger — a restart means deleting these by hand. See tools/ledger.py.
+    if created_rec:
+        ledger.record(ticket, "linear-issue", created_rec,
+                      note="sub-issue of " + parent["identifier"])
     print(f"parent {parent['identifier']}  {parent['title']!r}")
     if created: print(f"  created  {len(created)}: {', '.join(created)}")
     if updated: print(f"  updated  {len(updated)}: {', '.join(updated)}")
