@@ -7,8 +7,9 @@
 #     ./tools/sprint.sh QA-642 --push           create the cases over the API, no browser stop
 #     ./tools/sprint.sh QA-642 --dry-run        stop short of creating anything in Testmo
 #     ./tools/sprint.sh QA-642 --interval 300   poll every 5 minutes instead of 2
+#     ./tools/sprint.sh QA-642 --progress 15    heartbeat every 15s while drafting
 #
-# Eight phases, one process:
+# Nine phases, one process:
 #   1. draft      — claude runs /sprint: fetch, summarize, coverage, decide, draft, proof
 #   2. publish    — the cases go to Linear as sub-issues, awaiting review
 #   3. review     — poll Linear; a case that comes back with comments triggers /rework,
@@ -18,7 +19,8 @@
 #                   without it, the CSV is imported in the browser and the script waits.
 #   6. adopt      — refresh the cache, match the imported cases to their new ids
 #   7. plan       — build the run manifest: milestone, configs, every case id
-#   8. commission — create the milestone and the run(s)
+#   8. commission — create the milestone, the run(s) and the exploratory session
+#   9. link       — comment the Testmo links onto the matching Linear sub-issues
 #
 # Phases 3 and 5 wait on a human, so this stays up for as long as review takes. Ctrl-C is
 # safe at any point: the run folder holds the state and `--testmo-only` resumes the back
@@ -28,13 +30,13 @@ set -euo pipefail
 TICKET="${1:-}"
 if [[ -z "$TICKET" ]]; then
   echo "usage: ./tools/sprint.sh <TICKET-ID> [--testmo-only] [--push] [--no-watch] [--dry-run]" >&2
-  echo "                         [--interval N] [--max-cycles N]" >&2
+  echo "                         [--interval N] [--max-cycles N] [--progress N]" >&2
   exit 1
 fi
 shift
 cd "$(dirname "$0")/.."
 
-WATCH=1; INTERVAL=120; MAX_CYCLES=5; TESTMO_ONLY=0; DRY=0; PUSH=0; PASS=()
+WATCH=1; INTERVAL=120; MAX_CYCLES=5; TESTMO_ONLY=0; DRY=0; PUSH=0; PROGRESS=20; PASS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-watch)    WATCH=0; shift ;;
@@ -42,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run)     DRY=1; shift ;;
     --push)        PUSH=1; shift ;;
     --interval)    INTERVAL="$2"; shift 2 ;;
+    --progress)    PROGRESS="$2"; shift 2 ;;
     --max-cycles)  MAX_CYCLES="$2"; shift 2 ;;
     *)             PASS+=("$1"); shift ;;
   esac
@@ -67,6 +70,39 @@ find_claude() {
   return 1
 }
 
+# Phases 1-2 are one long `claude -p` call that prints nothing until it finishes, which
+# can be many minutes of apparent silence. The run folder is the progress log — each
+# artifact appears as its step completes — so tick through what has landed so far.
+STEP_FILES=(
+  "00-candidates.md|scored the candidate areas from the ticket"
+  "01-summary.md|read the ticket and filled the summary"
+  "03-coverage-raw.txt|queried the coverage repository"
+  "03-coverage.md|wrote up what already covers this"
+  "04-decision.md|decided the scoped pass and what to add"
+  "02-cases.md|drafted the cases"
+  "05-proof.md|proofed the drafted cases"
+  "review-state.json|published to Linear"
+)
+
+progress_ticker() {
+  local ticket="$1" interval="$2"
+  local start=$SECONDS
+  while :; do
+    sleep "$interval"
+    local el=$(( SECONDS - start ))
+    local done_n=0 last="" entry f desc
+    for entry in "${STEP_FILES[@]}"; do
+      f="${entry%%|*}"; desc="${entry#*|}"
+      if [[ -s "runs/$ticket/$f" ]]; then
+        done_n=$(( done_n + 1 )); last="$desc"
+      fi
+    done
+    printf "    [%02d:%02d] %d/%d · %s\n" \
+      $(( el / 60 )) $(( el % 60 )) "$done_n" "${#STEP_FILES[@]}" \
+      "${last:-starting up, reading the ticket}"
+  done
+}
+
 if [[ "$TESTMO_ONLY" -eq 0 ]]; then
   if [[ -d "runs/$TICKET" ]]; then
     echo "runs/$TICKET already exists." >&2
@@ -88,9 +124,18 @@ if [[ "$TESTMO_ONLY" -eq 0 ]]; then
 
   echo "=== 1-2. $TICKET — drafting and publishing ==="
   echo "    using $CLAUDE"
+  echo "    progress every ${PROGRESS}s; the run folder fills in as each step lands"
   EXTRA=""
   if [[ ${#PASS[@]} -gt 0 ]]; then EXTRA="${PASS[*]}"; fi
+
+  # Deliberately not creating runs/$TICKET here: new_run.py scaffolds it and skips the
+  # scaffold entirely if the folder already exists. The ticker copes with it missing.
+  progress_ticker "$TICKET" "$PROGRESS" &
+  TICKER=$!
+  trap 'kill "$TICKER" 2>/dev/null || true' EXIT INT TERM
   "$CLAUDE" -p "/sprint $TICKET $EXTRA" --permission-mode acceptEdits
+  kill "$TICKER" 2>/dev/null || true
+  trap - EXIT INT TERM
 
   if [[ "$WATCH" -eq 0 ]]; then
     echo "=== published; not watching (--no-watch) ==="
@@ -144,6 +189,10 @@ echo "=== 6. $TICKET — refreshing the cache and adopting the new case ids ==="
 python3 tools/case_export.py sync "$TICKET"
 
 echo
+echo "=== 6b. $TICKET — linking the cases into Linear ==="
+python3 tools/review_sync.py link "$TICKET" $( [[ "$DRY" -eq 1 ]] && echo --dry-run )
+
+echo
 echo "=== 7. $TICKET — planning the run ==="
 python3 tools/testmo_run.py plan "$TICKET"
 
@@ -156,6 +205,10 @@ if [[ "$DRY" -eq 1 ]]; then
   exit 0
 fi
 python3 tools/testmo_run.py commission "$TICKET"
+
+echo
+echo "=== 9. $TICKET — linking the run and session into Linear ==="
+python3 tools/review_sync.py link "$TICKET"
 
 echo
 echo "=== done. Everything created is listed in runs/$TICKET/CLEANUP.md ==="

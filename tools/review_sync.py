@@ -205,10 +205,20 @@ Q_CHILDREN = """
 query($id: String!) {
   issue(id: $id) {
     children { nodes {
-      id identifier title url
+      id identifier title url description
       state { name }
       comments { nodes { id body createdAt user { id name } } }
     } }
+  }
+}"""
+
+# Setting description alone. M_UPDATE also writes title, state and labels, which is right
+# for a case sub-issue this tool owns but wrong for QA-691/QA-695/QA-692 — those are
+# Connor's issues and we are only adding links to them.
+M_DESC = """
+mutation($id: String!, $desc: String!) {
+  issueUpdate(id: $id, input: {description: $desc}) {
+    success issue { id identifier url }
   }
 }"""
 
@@ -635,6 +645,144 @@ def stage(ticket):
     return 2
 
 
+# --- linking Testmo artifacts back into Linear -------------------------------
+
+# Which sub-issue each kind of Testmo artifact belongs on. The hint is matched against
+# sub-issue titles: an exact title wins, then a substring. `avoid` keeps "Test Run" from
+# matching "Run through test case outline", which contains the word and is a different job.
+LINK_TARGETS = {
+    "testmo-case":    {"hint": "create test case outline", "avoid": ("run through",),
+                       "heading": "Test cases in Testmo"},
+    "testmo-run":     {"hint": "test run", "avoid": ("run through", "outline"),
+                       "heading": "Testmo test run"},
+    "testmo-session": {"hint": "exploratory testing", "avoid": (),
+                       "heading": "Testmo exploratory session"},
+    "testmo-milestone": {"hint": "create milestone", "avoid": (),
+                       "heading": "Testmo milestone"},
+}
+
+
+def find_child(children, hint, avoid=()):
+    """The sub-issue a link belongs on. Exact title first, then substring."""
+    hint = hint.lower().strip()
+    usable = [c for c in children
+              if not any(a in c["title"].lower() for a in avoid)]
+    for c in usable:
+        if c["title"].lower().strip() == hint:
+            return c
+    hits = [c for c in usable if hint in c["title"].lower()]
+    if len(hits) == 1:
+        return hits[0]
+    # "create test case outline" vs a title worded the other way round
+    words = [w for w in hint.split() if len(w) > 3]
+    hits = [c for c in usable if all(w in c["title"].lower() for w in words)]
+    return hits[0] if len(hits) == 1 else None
+
+
+# Everything from this heading to the end of a description belongs to this tool. A
+# visible marker rather than an HTML comment: Linear's editor is rich text and may strip
+# comments, and a marker that silently vanishes would make every re-run append a duplicate.
+LINK_MARK = "## Testmo"
+
+
+def merge_links(description, block):
+    """Put the Testmo block at the end of a description, replacing any earlier one.
+
+    Whatever sits above the marker is the issue's own content — QA-691 carries a Google
+    Doc link — and is never touched.
+    """
+    body = (description or "").rstrip()
+    idx = body.find("\n" + LINK_MARK)
+    if body.startswith(LINK_MARK):
+        idx = 0
+    if idx != -1:
+        body = body[:idx].rstrip()
+    return (body + "\n\n" + block).lstrip() if body else block
+
+
+def link(ticket, dry=False):
+    """Write links to what this run put in Testmo into each sub-issue's description.
+
+    The ledger is the source: only artifacts recorded as created are linked, so a link
+    never points at something that does not exist. Re-running replaces the block rather
+    than stacking copies, and an unchanged description is left alone entirely.
+    """
+    data = ledger.load(ticket)
+    if not data["entries"]:
+        print(f"{ticket}: nothing recorded as created — nothing to link.")
+        return 0
+
+    children = gql(Q_CHILDREN, {"id": ticket})["issue"]["children"]["nodes"]
+    if not children:
+        sys.exit(f"{ticket} has no sub-issues to link into.")
+
+    by_kind = {}
+    for e in data["entries"]:
+        by_kind.setdefault(e["kind"], []).append(e)
+
+    # One sub-issue can own more than one kind, so collect per target before writing:
+    # two edits to the same description would otherwise have the second discard the first.
+    planned = {}
+    for kind, spec in LINK_TARGETS.items():
+        items = by_kind.get(kind)
+        if not items:
+            continue
+        target = find_child(children, spec["hint"], spec["avoid"])
+        if not target:
+            print(f"  -- {kind}: no sub-issue matching {spec['hint']!r} — skipped")
+            continue
+        build = ledger.KINDS[kind][1]
+        # The ledger is append-only, so pushing twice records both copies. Listing them is
+        # honest — they really are both in Testmo — but say so, because a duplicate case
+        # in the repository is a cleanup job, not a quirk of this description.
+        seen_names = {}
+        for it in items:
+            seen_names.setdefault(
+                (it.get("name") or "").strip().lower(), []).append(it)
+        dupes = {n: v for n, v in seen_names.items() if n and len(v) > 1}
+        if dupes:
+            print(f"     !! {len(dupes)} {kind} name(s) recorded more than once — "
+                  f"duplicates exist in Testmo:")
+            for n, v in dupes.items():
+                ids = ", ".join(str(i.get("id") or i.get("identifier")) for i in v)
+                print(f"        {ids}  {v[0].get('name', '')[:54]}")
+
+        lines = [f"**{spec['heading']}**", ""]
+        for it in items:
+            url = build(it)
+            name = it.get("name") or it.get("identifier") or it.get("id")
+            lines.append(f"- [{name}]({url})" if url else f"- {name}")
+        planned.setdefault(target["id"], {"target": target, "sections": []})
+        planned[target["id"]]["sections"].append("\n".join(lines))
+
+    written = 0
+    for entry in planned.values():
+        target, sections = entry["target"], entry["sections"]
+        block = LINK_MARK + "\n\n" + "\n\n".join(sections)
+        merged = merge_links(target.get("description"), block)
+        if merged.strip() == (target.get("description") or "").strip():
+            print(f"  == {target['identifier']} {target['title']!r}: already up to date")
+            continue
+        print(f"  -> {target['identifier']} {target['title']!r}")
+        if dry:
+            kept = merged[:len(merged) - len(block)].strip()
+            if kept:
+                first = kept.splitlines()[0]
+                print(f"         (keeping {len(kept)} chars above, starting "
+                      f"{first[:48]!r})")
+            for ln in block.splitlines():
+                print(f"         {ln}")
+            continue
+        gql(M_DESC, {"id": target["id"], "desc": merged})
+        written += 1
+
+    if dry:
+        print("\n  --dry-run: no description was changed.")
+    else:
+        print(f"\n  updated {written} description(s).")
+    return 0
+
+
 def main(argv):
     if not argv:
         print(__doc__)
@@ -656,12 +804,14 @@ def main(argv):
         poll(ticket, write=False); return 0
     if cmd == "stage":
         return stage(ticket)
+    if cmd == "link":
+        return link(ticket, dry="--dry-run" in argv)
     if cmd == "watch":
         return watch(ticket, int(opt("--interval", "30")),
                      on_rework=opt("--on-rework"),
                      max_cycles=int(opt("--max-cycles", "0")))
     sys.exit(f"Unknown command {cmd!r}. "
-             f"One of: publish, poll, watch, status, stage.")
+             f"One of: publish, poll, watch, status, stage, link.")
 
 
 if __name__ == "__main__":

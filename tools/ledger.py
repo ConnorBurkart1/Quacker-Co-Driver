@@ -32,13 +32,22 @@ TESTMO_URL = "https://eleostechnologies.testmo.net"
 KINDS = {
     "linear-issue": ("Linear sub-issues",
                      lambda i: LINEAR_URL.format(identifier=i.get("identifier", ""))),
+    # A case lives at /repositories/{repo_id}?group_id={folder_id}&case_id={id} — the
+    # repository view scrolled to that case inside its folder. There is no standalone
+    # /repositories/case/{id} page; that was a guess and it 404s. Older ledger entries
+    # have no folder_id, so fall back rather than emit a link that does not resolve.
     "testmo-case": ("Testmo cases",
-                    lambda i: f"{TESTMO_URL}/repositories/case/{i.get('id')}"),
+                    lambda i: (f"{TESTMO_URL}/repositories/{i.get('repo_id', 1)}"
+                               f"?group_id={i['folder_id']}&case_id={i.get('id')}")
+                              if i.get("folder_id") else ""),
     "testmo-milestone": ("Testmo milestones",
                          lambda i: f"{TESTMO_URL}/milestones/view/{i.get('id')}"
                                    if i.get("id") else ""),
     "testmo-run": ("Testmo runs",
                    lambda i: f"{TESTMO_URL}/runs/view/{i.get('id')}" if i.get("id") else ""),
+    "testmo-session": ("Testmo exploratory sessions",
+                       lambda i: f"{TESTMO_URL}/sessions/view/{i.get('id')}"
+                                 if i.get("id") else ""),
 }
 
 

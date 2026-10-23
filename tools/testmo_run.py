@@ -43,6 +43,7 @@ import urllib.error
 import urllib.request
 
 import ledger
+from review_state import drop_rejected
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE = os.path.join(ROOT, "testmo-cache.json")
@@ -69,6 +70,9 @@ STATUS_FLAGS = {
     "No Longer Valid": "retired — should not be in a pass",
     "Needs Updated": "carries a known defect",
     "Pending Review": "not finalised",
+    # Only reached by a case drafted on an *earlier* ticket and never promoted. The
+    # cases this run just created skip this table — vetting them is the point of the run.
+    "Claude - Needs Review": "drafted by Claude, never vetted on a device",
 }
 
 # Debug marker on everything this loop creates, so a restart can find it all.
@@ -76,7 +80,69 @@ MARKER = "Banana"
 
 CASE_RE = re.compile(r"\bC(\d{3,7})\b")
 TIER_RE = re.compile(r"^\s*\*\*Tier\b", re.I)
-ROW_RE = re.compile(r"^\s*\|\s*C(\d{3,7})\s*\|")
+# A scoped-pass table puts the cases in a column, but which column varies: decision docs
+# have been written as `| C1234 | why |` and as `| Must | C1141, C1142 | why |`. Rather
+# than guess an index, find the cell that is *nothing but* case keys and commas. A cell
+# holding prose is rationale, and rationale name-drops cases that are not in scope — so
+# reading the whole row would silently over-scope the run.
+CASES_CELL_RE = re.compile(r"^(?:\s|,|\*|C\d{3,7})+$")
+
+# The decision doc's exploratory charter becomes a Testmo session's Mission. The header is
+# written as "**Exploratory charter (owned by QA-692):**" — bold, naming the sub-issue.
+# The charter header has been written both ways across runs — "## Exploratory charter
+# (QA-692)" and "**Exploratory charter (owned by QA-692):**". Match either; a parser that
+# only knows one silently produces no session.
+CHARTER_RE = re.compile(r"^\s*(?:#{1,6}\s*|\*\*\s*)exploratory\b", re.I)
+SESSION_TEMPLATE_ID = 1
+
+
+def esc(s):
+    return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def parse_charter(decision):
+    """The exploratory charter, as HTML for a session's Mission field.
+
+    Takes prose paragraphs and bullets alike — the decision doc has used both. Returns ""
+    when there is no charter, which is a normal outcome: not every ticket wants one.
+    """
+    if not decision:
+        return ""
+    lines = decision.splitlines()
+    start = next((i + 1 for i, l in enumerate(lines) if CHARTER_RE.match(l)), None)
+    if start is None:
+        return ""
+    end = len(lines)
+    for i in range(start, len(lines)):
+        s = lines[i].strip()
+        if s.startswith("#") or (s.startswith("**") and s.endswith("**") and len(s) > 4):
+            end = i
+            break
+
+    bullets, paras, cur, mode = [], [], None, None
+    for line in lines[start:end]:
+        s = line.strip()
+        if not s:
+            if mode == "p" and cur:
+                paras.append(cur)
+                cur, mode = None, None
+            continue
+        if s.startswith("- "):
+            if cur:
+                (bullets if mode == "li" else paras).append(cur)
+            cur, mode = s[2:].strip(), "li"
+        elif mode == "li":
+            cur += " " + s                      # a wrapped bullet
+        else:
+            cur = (cur + " " + s) if cur else s  # a wrapped prose line
+            mode = "p"
+    if cur:
+        (bullets if mode == "li" else paras).append(cur)
+
+    out = "".join(f"<p>{esc(p)}</p>" for p in paras)
+    if bullets:
+        out += "<ul>" + "".join(f"<li>{esc(b)}</li>" for b in bullets) + "</ul>"
+    return out
 
 
 def die(msg):
@@ -157,8 +223,20 @@ def parse_scope(decision):
             continue
         if in_tier:                     # a Tier list wraps; keep taking its continuations
             keys.extend(found)
-        elif ROW_RE.match(line):
-            keys.append(ROW_RE.match(line).group(1))
+        elif line.lstrip().startswith("|"):
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            scoped = [c for c in cells if c and CASES_CELL_RE.match(c)]
+            if scoped:
+                for cell in scoped:
+                    keys.extend(CASE_RE.findall(cell))
+                # Cases named only in the rationale are mentions, not scope.
+                rest = [c for c in cells if c not in scoped and CASE_RE.findall(c)]
+                for cell in rest:
+                    extra = [k for k in CASE_RE.findall(cell) if k not in keys]
+                    if extra:
+                        excluded.append({"text": cell[:120], "cases": extra})
+            else:
+                excluded.append({"text": line.strip()[:120], "cases": found})
         else:
             excluded.append({"text": line.strip()[:120], "cases": found})
 
@@ -221,8 +299,9 @@ def resolve(keys, index, platform):
 
 
 def build(ticket, platform, milestone, milestone_src, cases, missing,
-          excluded, new_cases, cache_meta):
+          excluded, new_cases, cache_meta, charter=""):
     warnings = []
+    session = None
     if missing:
         warnings.append(f"{len(missing)} case(s) in the decision are not in the cache: "
                         + ", ".join("C" + m for m in missing))
@@ -240,9 +319,11 @@ def build(ticket, platform, milestone, milestone_src, cases, missing,
                         "`case_export.py build`, import the CSV, `refresh.py`, then "
                         "`case_export.py adopt` — until then they cannot be in a run.")
 
+    # runnable is True even though the status is unvetted: these are the cases the run
+    # exists to exercise. Vetting them is what the run is for.
     adopted_new = [{"id": n["testmo_id"], "key": f"C{n['testmo_id']}",
                     "name": n["title"], "area": None, "suite": None,
-                    "status": "In Use", "os": n.get("os") or "",
+                    "status": "Claude - Needs Review", "os": n.get("os") or "",
                     "runnable": True, "new": True}
                    for n in new_cases if n.get("testmo_id")]
     cases = cases + adopted_new
@@ -268,6 +349,21 @@ def build(ticket, platform, milestone, milestone_src, cases, missing,
             "cases": cases,
         })
 
+    # An exploratory session is a charter, not a case list: it exists so a tester has a
+    # written remit to go poke at the area. Only built when the decision doc wrote one.
+    if charter:
+        first = runs[0] if runs else None
+        session = {
+            "name": f"{ticket} Exploratory"
+                    + (f" - {first['config_name']}" if first else ""),
+            "template_id": SESSION_TEMPLATE_ID,
+            "config_id": first["config_id"] if first else None,
+            "mission": charter,
+        }
+    elif platform:
+        warnings.append("no exploratory charter in 04-decision.md, so no session will be "
+                        "created — add a '**Exploratory charter:**' bullet list to make one")
+
     return {
         "ticket": ticket,
         "generated_at": datetime.datetime.now(datetime.timezone.utc)
@@ -279,6 +375,7 @@ def build(ticket, platform, milestone, milestone_src, cases, missing,
         "platform": platform,
         "runs": runs,
         "new_cases": new_cases,
+        "session": session,
         "excluded_mentions": excluded,
         "warnings": warnings,
     }
@@ -373,6 +470,20 @@ def cmd_commission(args):
     if made:
         ledger.record(args.ticket, "testmo-run", made)
 
+    s = m.get("session")
+    if s:
+        print(f"\n  exploratory session: {s['name']!r}")
+        payload = {"name": s["name"], "template_id": s["template_id"],
+                   "custom_mission": s["mission"]}
+        if s.get("config_id"):
+            payload["config_id"] = s["config_id"]
+        if ms_id:
+            payload["milestone_id"] = ms_id
+        res = post(url, token, f"projects/{project}/sessions", payload, dry)
+        if res and res.get("id"):
+            ledger.record(args.ticket, "testmo-session",
+                          [{"id": res["id"], "name": s["name"]}])
+
     if dry:
         print("\n  dry run — nothing was created.")
         return 0
@@ -398,12 +509,28 @@ def cmd_plan(args):
     platform = parse_platform(summary)
     milestone, msrc = parse_milestone(args.ticket, summary, args.milestone)
     keys, excluded = parse_scope(decision)
+    forced = CASE_RE.findall(args.include.upper()) if args.include else []
+    for k in forced:
+        if k not in keys:
+            keys.append(k)
+    if forced:
+        print(f"  --include added {len(forced)} case(s): "
+              + ", ".join("C" + k for k in forced))
+        excluded = [e for e in excluded
+                    if [c for c in e["cases"] if c not in keys]]
     if not keys:
-        die("no scoped-pass cases found in 04-decision.md. Expected a '## The scoped pass' "
-            "section with **Tier** lines or a | C#### | table.")
+        die("no scoped-pass cases found in 04-decision.md.\n"
+            "  Expected a section whose heading contains 'scoped pass', holding either\n"
+            "  **Tier** lines or a markdown table with a column of case keys.\n"
+            "  Add --include C1234,C5678 to name them directly.")
 
     cases, missing = resolve(keys, index, platform[0] if platform else None)
     new_cases = parse_new_cases(cases_md)
+    # Canceled in review means it was never pushed, so it has no Testmo id and must not
+    # be counted as a missing one — that refusal is what stopped QA-685 before phase 8.
+    new_cases, rejected_new = drop_rejected(args.ticket, new_cases)
+    for t in rejected_new:
+        print(f"  skipping (canceled in review): {t[:66]}")
 
     # case_export.py adopt records the ids the CSV import created. Until that has run,
     # the new cases have no id and cannot be put in a run.
@@ -413,7 +540,7 @@ def cmd_plan(args):
     for n in new_cases:
         n["testmo_id"] = adopted.get(n["title"].strip().lower())
     manifest = build(args.ticket, platform, milestone, msrc, cases, missing,
-                     excluded, new_cases, cache_meta)
+                     excluded, new_cases, cache_meta, parse_charter(decision))
 
     out = os.path.join(folder, "09-run.json")
     with open(out, "w", encoding="utf-8") as f:
@@ -441,9 +568,19 @@ def cmd_plan(args):
         for n in pending:
             print(f"       .. {n['title'][:66]}")
     if excluded:
-        print(f"\n  mentioned in the section but not taken as scope ({len(excluded)}):")
+        n_ex = sum(len(e["cases"]) for e in excluded)
+        print(f"\n  !! {n_ex} case(s) are named in the scoped-pass section but are NOT in "
+              f"this run.")
+        print( "     Prose is not machine-readable, so a case scoped in a sentence rather "
+               "than the")
+        print( "     table is left out. Some of these are citations and belong out; some "
+               "may not be.")
         for e in excluded:
             print(f"       -- {', '.join('C' + c for c in e['cases'])}: {e['text'][:70]}")
+        print( "\n     To add any of them, either move them into the scoped-pass table "
+               "in 04-decision.md,")
+        print(f"     or re-plan with:  python3 tools/testmo_run.py plan {args.ticket} "
+               "--include C1234,C5678")
     if manifest["warnings"]:
         print("\n  warnings:")
         for w in manifest["warnings"]:
@@ -458,6 +595,9 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("plan", help="build the run manifest from the run folder (sends nothing)")
     p.add_argument("ticket")
+    p.add_argument("--include", default="",
+                   help="case keys to add to the scoped pass (C1234,C5678). For cases the "
+                        "decision doc scopes in prose, which is not machine-readable.")
     p.add_argument("--milestone",
                    help="exact milestone name to use instead of the generated one")
     p.set_defaults(func=cmd_plan)

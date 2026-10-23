@@ -69,7 +69,10 @@ RETIRED_STATUS = "No Longer Valid"
 # with it on 285 cases.
 MANUAL_STATUSES = {"In Use"}
 # Everything else live is in neither state — drafted, parked, or junk.
-UNRUNNABLE_STATUSES = {"Pending Review", "Needs Updated", "Pasta"}
+UNRUNNABLE_STATUSES = {"Pending Review", "Needs Updated", "Pasta",
+                       # Drafted by Claude, approved in Linear, not yet vetted against a
+                       # device. Deliberately not coverage until a lead promotes it.
+                       "Claude - Needs Review"}
 
 
 def strip_html(raw):

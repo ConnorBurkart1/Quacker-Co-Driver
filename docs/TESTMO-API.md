@@ -49,10 +49,62 @@ the methods it accepts.** It is how the table below was built without sending a 
 | `projects/{p}/configs` | ✅ list | |
 | `projects/{p}/tags` | ✅ list | |
 
-**Cases are list-only.** No member read, no member update. Combined with the list endpoint
-omitting Steps, Preconditions and Goal/Purpose, assume the repository is not writable over
-this API until the docs say otherwise. Cases go in through the CSV import — see
-`tools/case_export.py`.
+## The list endpoint hides fields. Never conclude a field does not exist from it.
+
+`projects/{p}/cases` returns **9 of template 3's 17 fields**. Steps, Preconditions and
+Goal/Purpose are absent, and so is **Issues** — and there is no member route to ask for
+one case in full. A field missing from a list response says nothing about whether the
+field exists.
+
+This has caused one wrong conclusion already: case 519702 came back with no issue data, so
+cases were declared incapable of carrying issue links. The Testmo UI shows `GRP-324` on
+that very case. **The CSV export is the authority on what a case can hold**, not the API
+list.
+
+## Issues are a case-level field
+
+The export's `Issues` column (11 of 25) carries them: bare Linear keys, comma-separated,
+no spaces, up to three on a case.
+
+    GRP-403,GRP-455        EIN-6924        BUG-132,BUG-292,BUG-295
+
+328 of 3,624 cases use it. Every key belongs to a product team — **EPW** (152), **GRP**
+(106), **BUG** (84), **EIN** (79). **No case references a QA ticket.** The field tracks
+the engineering work a case exists because of, not the QA task that wrote it.
+
+Run *results* also carry `issues`, but as **integer record ids** (`[412]`), not keys —
+a different representation of the same underlying table. 30 of 2,575 recent results use it.
+
+### Writing issues over the API
+
+`POST projects/{p}/cases` **does** take `issues`, but not in the CSV's format. The 422
+gives the schema:
+
+> The issues field must be an array of integers or objects with display_id and
+> integration_id.
+
+Integers are Testmo's own issue record ids (what a run result's `issues: [412]` holds).
+We have keys, not ids, so it is the object form:
+
+```json
+"issues": [{"display_id": "QA-685", "integration_id": 2}]
+```
+
+**`integration_id` is 2** — the Linear tracker. Found by probing, since no route lists
+integrations (`projects/{p}/integrations`, `issue/integrations` and five other spellings
+are all route-absent):
+
+| id | result |
+|---|---|
+| 1 | exists, but `connection_project_id field is required for GitHub and GitLab trackers` |
+| **2** | **validates clean — errors identical to the control** |
+| 3-6 | `Issue integration with ID n does not exist or is not active.` |
+
+The probe sends each candidate with `name` omitted, so the record can never be created and
+the only thing that varies is whether the server objects to the integration.
+`tools/probe_issues.py` does this; it is throwaway now that the answer is recorded here.
+
+Cases also go in through the CSV import — see `tools/case_export.py`.
 
 ## Manual runs vs automation runs
 
@@ -116,15 +168,57 @@ is why a case carries both `suite` and `folder_path`.
 
 The team already links a failing result to a Linear issue in `note`. Keep that.
 
+## Sessions
+
+`projects/{p}/sessions` lists them — 730 on this instance. A session is an exploratory
+charter: `template_id` **1**, a `config_id`, a `milestone_id`, and the charter itself in
+**`custom_mission`** as HTML. Sessions carry `issues` and `tags` natively.
+
+`projects/{p}/templates` returns only the three *case* templates, so template 1's fields
+are not listed there; the session custom fields come from `projects/{p}/fields` where
+`entity == "session"`: `custom_mission`, `custom_branch_name`, `custom_configurations`,
+and three story-link URLs.
+
+A session's web URL is `/sessions/view/{id}` — confirmed against a real one (881).
+
+## Web URLs, all confirmed against live records
+
+| Thing | URL |
+|---|---|
+| Case | `/repositories/{repo_id}?group_id={folder_id}&case_id={id}` |
+| Run | `/runs/view/{id}` |
+| Milestone | `/milestones/view/{id}` |
+| Session | `/sessions/view/{id}` |
+
+**A case has no standalone page.** `/repositories/case/{id}` looks plausible and does not
+resolve — it was a guess that shipped in links for two runs. The real view is the
+repository browser scrolled to that case inside its folder, so it needs `group_id`, which
+is the **folder id** (confirmed: case 815328 is folder 197, and its URL is
+`/repositories/1?group_id=197&case_id=815328`). `repo_id` is 1 on this instance.
+
+`group_id` means the grouping currently applied, so when the repository is grouped by
+suite instead the same slot holds a suite id — `?group_by=repository_cases:custom_suite&
+group_id=37` is case 519702 grouped by its suite. Folder grouping is the default, so the
+ledger uses `folder_id`.
+
+## Answered since this was written
+
+1. **`POST projects/{p}/cases`** exists and is a **bulk** endpoint: `{"cases": [ … ]}`.
+   Custom fields are **top-level keys named by `column_name`**, not a `custom_fields` dict,
+   and they are validated against the template. The names are not guessable — Expected
+   Result is `custom_expected`, Goal/Purpose is `custom_description` — so read them from
+   `GET projects/{p}/fields` where `entity == "repository_case"` (**not** `"case"`, which
+   matches nothing).
+2. **`POST projects/{p}/runs`** exists — proven by creating one.
+3. **`POST projects/{p}/milestones`** exists — same.
+4. **`POST projects/{p}/sessions`** — the payload is above.
+
 ## Still unknown
 
-1. **Does `POST projects/{p}/cases` exist, and what body does it take?** The template field
-   ids above are almost certainly the payload, but the envelope — `custom_fields` keyed by
-   id, versus `custom_<system_name>` columns — is a guess, and guessing at a write API is
-   how you create 5 broken cases.
-2. **Does `POST projects/{p}/runs` exist?** `PATCH` on the member route is confirmed, so
-   runs are writable, but create is not proven.
-3. **Does `POST projects/{p}/milestones` exist?**
+- Whether `issues` sent inside a case object is applied or only validated. The 422 for a
+  bad integration comes back keyed `issues`, not `cases.0.issues`, which hints the field
+  may be read at the envelope level. The next real push settles it: check the created case
+  in the browser for the link.
 
 All three are one documentation page away. The blocked request was
 `GET https://docs.testmo.com/api/reference/runs`; the allowlist line that would settle it:

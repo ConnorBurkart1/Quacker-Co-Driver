@@ -28,6 +28,32 @@ So every run produces two lists, one of which is never empty:
 The failure mode to design against is a ticket filed as "just a refactor" and therefore
 tested as nothing.
 
+## Every case in the scoped pass goes in the table. No exceptions.
+
+`testmo_run.py plan` builds the Testmo run by reading the scoped-pass table in
+`04-decision.md`. **A case scoped in a sentence is not in the run.**
+
+This is not a parser limitation to work around — it is undecidable. In the same paragraph,
+`C330672 shows that false switches Genius Scan off` is a citation that must stay out, while
+`C322007 (flag true): scan the BARCODE field` is a case to run. Nothing can tell those
+apart, so only the table counts.
+
+So: **if a case should be executed, it gets a row.** Prose explains *why* a row is there;
+it never introduces a case of its own. On QA-685 six cases were scoped in prose and the
+run covered 17 of the intended 23 — the analysis was right and the run was wrong.
+
+The table needs one column that is nothing but case keys. Both of these parse:
+
+```markdown
+| Tier | Cases | Why |
+|---|---|---|
+| Must | C1141, C1142 | Every HORSEY field decodes to the same value |
+| Should | C1146 | Orientation |
+```
+
+A cell holding prose is read as rationale, so cases named there are reported as mentions
+and left out — `plan` prints them loudly at the end. **Read that list every run.**
+
 ## The run folder is how stages talk to each other
 
 ```
@@ -109,7 +135,7 @@ This is the team template, written in the form the validator reads:
 
 ```markdown
 ## Case: Moving a stop pin while offline retains the new location after reconnect
-- **Status:** In Use
+- **Status:** Claude - Needs Review
 - **Area:** Pin
 - **Suite:** App Navigation/Trip Planner (New TBT/ New Route Options)
 - **OS:** All (not restricted)
@@ -157,9 +183,27 @@ stores and prints what each one will import as.**
 
 | Write | Imports as |
 |---|---|
+| Status: `Claude - Needs Review` | the same — it is a real Testmo status |
 | Status: `Manual` | `In Use` — same thing, Testmo's label differs |
 | Flag State: `on` / `off` | `True` / `False` |
 | Release: `release-1.66` | `1.66` |
+
+## Every drafted case is `Claude - Needs Review`. Never `In Use`.
+
+`In Use` is what the team's 1,240 vetted cases carry. A case written minutes ago has not
+earned it, and once it is in the repository nothing in its text says who wrote it — the
+status is the only thing that does.
+
+So drafted cases import as **`Claude - Needs Review`** (a real option on template 3), and
+a QA lead promotes them to `In Use` by hand after watching them run on a device. Nothing
+in this loop promotes them; a gate that approves itself is not a gate.
+
+The consequence, which is intended: `coverage.py` counts these as *unrunnable*, not as
+coverage, until they are promoted. An area with nothing but unpromoted Claude cases still
+reads as uncovered — because in the sense that matters, it is.
+
+Approval in Linear is a separate, earlier gate. It means the words are right. This one
+means the case actually works.
 
 ## Configuration is three separate axes — do not collapse them
 

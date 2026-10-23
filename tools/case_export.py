@@ -35,13 +35,38 @@ import urllib.error
 import urllib.request
 
 import ledger
+from review_state import drop_rejected
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE = os.path.join(ROOT, "testmo-cache.json")
 
 COLUMNS = ["Case", "Folder", "Suite", "Restricted to OS", "Test Case Status",
            "Template", "Configurations", "Preconditions", "Steps", "Expected Result",
-           "Goal/Purpose"]
+           "Goal/Purpose", "Issues"]
+
+# Testmo links a case to tracker issues through the export's `Issues` column: bare keys,
+# comma-separated, no spaces. 328 of the repository's 3,624 cases carry one. The field is
+# invisible to GET projects/{p}/cases, which returns 9 of 17 fields — the CSV export is
+# the only thing that shows what a case really holds. See docs/TESTMO-API.md.
+ISSUE_RE = re.compile(r"[A-Z][A-Z0-9]{1,5}-\d+")
+
+# Over the API, `issues` is NOT the CSV's comma-separated string. The 422 spells out the
+# shape: "an array of integers or objects with display_id and integration_id". Integers are
+# Testmo's own issue record ids, which we do not have — we have keys — so it is the object
+# form. The integration id was found by probing (tools/probe_issues.py): 1 is a GitHub or
+# GitLab tracker and demands connection_project_id, 3-6 "do not exist or are not active",
+# and 2 validates clean. 2 is the Linear tracker.
+ISSUE_INTEGRATION_ID = 2
+
+
+def issue_keys(*sources):
+    """Normalise issue references into Testmo's format, in first-seen order."""
+    out = []
+    for s in sources:
+        for key in ISSUE_RE.findall((s or "").upper()):
+            if key not in out:
+                out.append(key)
+    return ",".join(out)
 
 TEMPLATE = "Test Case Template"
 TEMPLATE_ID = 3
@@ -54,9 +79,14 @@ TEMPLATE_ID = 3
 PUSH_FIELDS = ("Preconditions", "Steps", "Expected Result", "Goal/Purpose",
                "Restricted to OS", "Test Case Status", "Suite", "Release Introduced")
 
+# A case Claude drafted imports as this, not as "In Use" — see validate_cases.py.
+DRAFT_STATUS = "Claude - Needs Review"
+
 # The team writes "Manual"; Testmo stores "In Use". Same values, different vocabulary —
 # translate rather than reject. Mirrors STATUS_ALIASES in validate_cases.py.
 STATUS_ALIASES = {
+    "claude - needs review": DRAFT_STATUS, "claude needs review": DRAFT_STATUS,
+    "needs review": DRAFT_STATUS, "draft": DRAFT_STATUS,
     "manual": "In Use", "in use": "In Use",
     "automated": "Automated",
     "automated - android": "Automated - Android",
@@ -107,23 +137,46 @@ def case_fields(url, token, project):
     return out
 
 
-def folder_id_for(cache, area, suite):
-    """Resolve a folder by taking it from cases that already live in it.
+def folder_candidates(cache, area, suite=""):
+    """Every folder an Area could mean, most-populated first.
 
-    Folder names are not unique — 'Settings' is id 197 under App Settings / Logout and
-    'SETTINGS' is id 47 under App Drive Axle. Matching on area AND suite, through cases
-    that are already filed there, avoids picking the wrong one.
+    Folder names are not unique. 'Form Scan' is two folders — `App Scanning/Imaging >
+    Form Scan` (189) and `App Scanning/Imaging (Autoscan) > Form Scan` (38540) — and
+    'Settings' is id 197 under App Settings/Logout but 47 under App Drive Axle. Suite does
+    not disambiguate them: it is a template field, not folder structure, so the same suite
+    appears under both.
+
+    An Area containing '>' is treated as a full folder path and matched as one, which is
+    how an ambiguous name is pinned down.
     """
-    a, s_ = area.strip().lower(), suite.strip().lower()
-    exact = {c["folder_id"] for c in cache["cases"]
-             if (c.get("area") or "").strip().lower() == a
-             and (c.get("suite") or "").strip().lower() == s_ and c.get("folder_id")}
-    if len(exact) == 1:
-        return exact.pop()
-    loose = {c["folder_id"] for c in cache["cases"]
-             if (c.get("area") or "").strip().lower() == a and c.get("folder_id")}
-    if len(loose) == 1:
-        return loose.pop()
+    a, s_ = area.strip().lower(), (suite or "").strip().lower()
+    full = ">" in area
+
+    def key(c):
+        p = (c.get("folder_path") or "").strip().lower()
+        return p if full else (c.get("area") or "").strip().lower()
+
+    def norm(p):
+        return re.sub(r"\s*>\s*", " > ", p.strip())
+
+    rows = {}
+    for c in cache["cases"]:
+        if not c.get("folder_id") or key(c) != (norm(a) if full else a):
+            continue
+        fid = c["folder_id"]
+        r = rows.setdefault(fid, {"id": fid, "path": c.get("folder_path") or "",
+                                  "n": 0, "suited": 0})
+        r["n"] += 1
+        if s_ and (c.get("suite") or "").strip().lower() == s_:
+            r["suited"] += 1
+    return sorted(rows.values(), key=lambda r: (-r["suited"], -r["n"]))
+
+
+def folder_id_for(cache, area, suite):
+    """The one folder this Area means, or None when it is genuinely ambiguous."""
+    cands = folder_candidates(cache, area, suite)
+    if len(cands) == 1:
+        return cands[0]["id"]
     return None
 
 
@@ -195,7 +248,8 @@ def parse_cases(path):
         meta = dict(re.findall(r"^- \*\*([^:*]+):\*\*\s*(.+)$", b, re.M))
         get = lambda k: (meta.get(k) or "").strip()
 
-        status_raw = get("Status") or "Manual"
+        # No Status line means this came out of drafting, so it is not vetted.
+        status_raw = get("Status") or DRAFT_STATUS
         status = STATUS_ALIASES.get(status_raw.lower(), status_raw)
         os_val = get("OS") or "All (not restricted)"
 
@@ -213,6 +267,8 @@ def parse_cases(path):
             "Expected Result": as_paragraphs(collect(b, "Expected Results")
                                              or collect(b, "Expected")),
             "Goal/Purpose": as_paragraphs(collect(b, "Goals")),
+            # Merged with the run's ticket in cmd_build; a case may name extra issues.
+            "Issues": issue_keys(get("Issues")),
             "_release": get("Release"),
             "_os_raw": os_val,
         })
@@ -247,7 +303,20 @@ def cmd_build(args):
         die(f"no runs/{args.ticket}/02-cases.md")
 
     cases = parse_cases(src)
+    cases, rejected = drop_rejected(args.ticket, cases)
+    for c in cases:
+        c["Issues"] = issue_keys(args.ticket, c.get("Issues"))
     warnings = check(cases)
+    for t in rejected:
+        warnings.insert(0, f"canceled in review, not imported: {t[:70]}")
+    if not cases:
+        die(f"every drafted case for {args.ticket} was canceled in review — "
+            "nothing to import.")
+    # A ticket that does not look like a tracker key links nothing. Say so rather than
+    # writing a CSV whose Issues column is quietly empty.
+    if not issue_keys(args.ticket):
+        warnings.insert(0, f"ticket {args.ticket!r} is not a tracker key "
+                            "(TEAM-123), so no case will be linked to an issue")
     out = os.path.join(folder, "08-import.csv")
     with open(out, "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
@@ -263,7 +332,7 @@ def cmd_build(args):
         print(f"  {c['title'][:58]:<58} {c['Restricted to OS']:<20} "
               f"{pre} pre / {steps} steps / {res} results")
         print(f"      folder {c['Folder']!r}  suite {c['Suite']!r}  "
-              f"status {c['Test Case Status']!r}")
+              f"status {c['Test Case Status']!r}  issues {c['Issues']!r}")
     if warnings:
         print("\n  warnings:")
         for w_ in warnings:
@@ -292,6 +361,11 @@ def cmd_adopt(args):
         by_name.setdefault(c["name"].strip().lower(), []).append(c)
 
     cases = parse_cases(src)
+    # A canceled case was never pushed, so it will never be in the cache. Looking for it
+    # and exiting 1 on the miss stops the whole run before the milestone and run are made.
+    cases, rejected = drop_rejected(args.ticket, cases)
+    for t in rejected:
+        print(f"  skipping (canceled in review): {t[:66]}")
     found, missing, ambiguous = [], [], []
     for c in cases:
         hits = by_name.get(c["title"].strip().lower(), [])
@@ -301,7 +375,9 @@ def cmd_adopt(args):
             ambiguous.append((c["title"], [h["id"] for h in hits]))
         else:
             found.append({"id": hits[0]["id"], "name": hits[0]["name"],
-                          "area": hits[0].get("area")})
+                          "area": hits[0].get("area"),
+                          "folder_id": hits[0].get("folder_id"),
+                          "repo_id": cache.get("repo_id", 1)})
 
     print(f"{args.ticket} — adopting imported cases "
           f"(cache fetched {cache.get('fetched_at')})\n")
@@ -343,12 +419,13 @@ def cmd_sync(args):
 
 
 def cmd_push(args):
-    """Try to create the cases over the API. Unproven — see docs/TESTMO-API.md.
+    """Create the cases over the API. Proven — C815316 was created this way on QA-685.
 
-    Testmo exposes no member route for cases, which is why the CSV import exists as the
-    supported path. Whether POST on the collection works has never been tested; this is
-    the test. Run it with --limit 1 first: one marked case is trivial to delete, and the
-    error body from a rejected payload is the schema we are missing.
+    `POST projects/{p}/cases` is a BULK endpoint: the payload is {"cases": [...]}, custom
+    fields are top-level keys named by column_name, and `issues` takes objects of
+    {display_id, integration_id} rather than the CSV's comma-separated string. See
+    docs/TESTMO-API.md. Testmo exposes no member route and no delete, so a case created
+    here is removed in the browser — run with --limit 1 when trying something new.
     """
     folder = os.path.join(ROOT, "runs", args.ticket)
     src = os.path.join(folder, "02-cases.md")
@@ -360,6 +437,14 @@ def cmd_push(args):
         cache = json.load(f)
 
     cases = parse_cases(src)
+    cases, rejected = drop_rejected(args.ticket, cases)
+    for t in rejected:
+        print(f"  skipping (canceled in review): {t[:66]}")
+    if not cases:
+        die(f"every drafted case for {args.ticket} was canceled in review — "
+            "nothing to push.")
+    for c in cases:
+        c["Issues"] = issue_keys(args.ticket, c.get("Issues"))
     if args.limit:
         cases = cases[:args.limit]
     url, token = load_env()
@@ -378,8 +463,20 @@ def cmd_push(args):
     for c in cases:
         fid = folder_id_for(cache, c["Folder"], c["Suite"])
         if not fid:
-            die(f"could not resolve a folder id for area {c['Folder']!r} / suite "
-                f"{c['Suite']!r} — no existing case is filed under both.")
+            cands = folder_candidates(cache, c["Folder"], c["Suite"])
+            if not cands:
+                die(f"area {c['Folder']!r} matches no folder in the repository.\n"
+                    f"  (case: {c['Case'][:60]})")
+            lines = [f"      {r['path']}   — {r['n']} cases"
+                     + (f", {r['suited']} of them in suite {c['Suite']!r}"
+                        if r["suited"] else "")
+                     for r in cands]
+            die(f"area {c['Folder']!r} is {len(cands)} different folders, so this case "
+                f"has nowhere definite to go:\n" + "\n".join(lines) + "\n\n"
+                f"  (case: {c['Case'][:60]})\n"
+                "  Suite does not disambiguate them — it is a template field, not folder\n"
+                "  structure. Set the Area to the full path in 02-cases.md, e.g.\n"
+                f"      - **Area:** {cands[0]['path']}")
         payload = {"name": c["Case"], "folder_id": fid, "template_id": TEMPLATE_ID}
         c["Release Introduced"] = c.get("_release") or ""
         for label in PUSH_FIELDS:
@@ -396,7 +493,15 @@ def cmd_push(args):
             else:
                 payload[spec["column"]] = value
 
-        print(f"  {c['Case'][:66]}  -> folder {fid}")
+        # The CSV carries issues as "QA-685,EIN-6924"; the API wants them one object each.
+        keys = [k.strip() for k in (c.get("Issues") or "").split(",") if k.strip()]
+        if keys:
+            payload["issues"] = [{"display_id": k,
+                                  "integration_id": ISSUE_INTEGRATION_ID} for k in keys]
+
+        c["_folder_id"] = fid
+        print(f"  {c['Case'][:66]}  -> folder {fid}"
+              + (f"  issues {','.join(keys)}" if keys else "  (no issue link)"))
         items.append(payload)
 
     envelope = {"cases": items}
@@ -430,7 +535,9 @@ def cmd_push(args):
     for item, c in zip(made, cases):
         if isinstance(item, dict) and item.get("id"):
             print(f"         -> created C{item['id']}  {c['Case'][:52]}")
-            created.append({"id": item["id"], "name": c["Case"]})
+            created.append({"id": item["id"], "name": c["Case"],
+                            "folder_id": c.get("_folder_id"),
+                            "repo_id": cache.get("repo_id", 1)})
 
     if created:
         ledger.record(args.ticket, "testmo-case", created, note="created by API push")

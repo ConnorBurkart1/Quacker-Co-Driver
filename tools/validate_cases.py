@@ -44,15 +44,25 @@ ROOT = os.path.dirname(HERE)          # repo root: .env, the cache and runs/ liv
 CACHE = os.path.join(ROOT, "testmo-cache.json")
 
 VALID_OS = {"All (not restricted)", "Android", "iOS"}
+
+# What a case Claude drafted imports as. It is a real option on template 3 (id 100) and
+# it exists so a drafted case is never mistaken for a vetted one in the repository: until
+# a QA lead promotes it by hand, coverage.py counts it as unrunnable, not as coverage.
+# Promotion is deliberately manual — a tool that promoted these would be the gate
+# approving itself.
+DRAFT_STATUS = "Claude - Needs Review"
+
 # The strings Testmo actually stores.
 VALID_STATUS = {"In Use", "Automated", "Automated - Android", "Automated  -  iOS",
-                "Automated on Axle"}
+                "Automated on Axle", DRAFT_STATUS}
 VALID_FLAG_STATE = {"True", "False", "Not Present", "N/A"}
 
 # How the team writes these on paper, mapped to what Testmo stores. The team template
 # says "Manual" and "{on/off}"; those are correct English for the same values. Translate
 # them rather than rejecting them — a validator that argues about vocabulary is noise.
 STATUS_ALIASES = {
+    "claude - needs review": DRAFT_STATUS, "claude needs review": DRAFT_STATUS,
+    "needs review": DRAFT_STATUS, "draft": DRAFT_STATUS,
     "manual": "In Use", "in use": "In Use",
     "automated": "Automated",
     "automated - android": "Automated - Android", "automated-android": "Automated - Android",
@@ -79,6 +89,13 @@ def load_corpus():
     return {
         "cases": live,
         "areas": {c["area"] for c in live if c["area"]},
+        # An area name can be more than one folder: 'Form Scan' is both
+        # `App Scanning/Imaging > Form Scan` and `App Scanning/Imaging (Autoscan) > Form
+        # Scan`. A case filed under an ambiguous name has nowhere definite to go, and the
+        # import fails — after review, which is the expensive place to find out. Catch it
+        # here instead.
+        "area_folders": _area_folders(live),
+        "folder_paths": {c["folder_path"] for c in live if c.get("folder_path")},
         "suites": {c["suite"] for c in live if c["suite"]},
         "flags": {c["flag_name"] for c in live if c["flag_name"]},
         "flag_keys": {c["flag_key"] for c in live if c["flag_key"]},
@@ -126,6 +143,16 @@ def _keywords(title):
             continue
         words.add(re.sub(r"(?:es|s)$", "", w) if len(w) > 4 else w)
     return words
+
+
+def _area_folders(live):
+    """area name -> the distinct folder paths that name resolves to."""
+    out = {}
+    for c in live:
+        a, p = c.get("area"), c.get("folder_path")
+        if a and p:
+            out.setdefault(a, set()).add(p)
+    return {a: sorted(ps) for a, ps in out.items()}
 
 
 def _users(live):
@@ -230,10 +257,22 @@ def check(case, corpus):
     area = case["meta"]["Area"]
     if not area:
         errors.append("no Area")
+    elif ">" in area:
+        if area.strip() not in corpus["folder_paths"]:
+            near = difflib.get_close_matches(area, corpus["folder_paths"], n=2, cutoff=0.5)
+            errors.append(f"Area {area!r} is not a folder path in the repository"
+                          + (f" — did you mean {near}?" if near else ""))
     elif area not in corpus["areas"]:
         near = difflib.get_close_matches(area, corpus["areas"], n=3, cutoff=0.6)
         errors.append(f"Area {area!r} is not in the repository"
                       + (f" — did you mean {near}?" if near else ""))
+    else:
+        paths = corpus["area_folders"].get(area, [])
+        if len(paths) > 1:
+            errors.append(
+                f"Area {area!r} is {len(paths)} different folders, so the import has "
+                "nowhere to put this case. Use the full path: "
+                + " | ".join(sorted(paths)))
 
     suite = case["meta"]["Suite"]
     if suite and suite not in corpus["suites"]:

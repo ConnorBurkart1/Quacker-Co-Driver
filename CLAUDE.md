@@ -18,6 +18,35 @@ sub-issues in Linear is. **Publish, then report.**
 If the decision is "no new cases", say so plainly and publish nothing. Never invent a case
 to have something to publish.
 
+## A new step in the loop is not done until `README.md` says so
+
+Whenever a phase, a tool, or a field is added to the loop, update `README.md` **in the same
+turn** — the phase list under "One command", the tools table, the run-folder listing, and
+the stage table if a stage moved. Connor is tracking what gets built from that file; a step
+that works but is undocumented is a step he has to rediscover.
+
+The same applies to anything learned about an external API: it goes in `docs/TESTMO-API.md`
+so nobody probes it twice.
+
+## A canceled case must disappear everywhere, in one place
+
+Moving a sub-issue to **Canceled** means do not ship that case. Four tools read
+`02-cases.md` after review and every one of them has to agree, so the check lives in
+`tools/review_state.py` and nowhere else. Import `drop_rejected` from there.
+
+Adding the check to some of them is worse than none: on QA-685 `build` and `push` honoured
+it while `adopt` still hunted for the canceled case, exited 1, and killed the run before
+the milestone, test run and session were created. The symptom looked like "the links are
+broken"; the cause was one missing import three phases earlier.
+
+## Formats in `04-decision.md` drift, so parse both
+
+The exploratory charter has been written as `## Exploratory charter (QA-692)` and as
+`**Exploratory charter (owned by QA-692):**`, with bullets one run and prose the next. The
+scoped pass has been `| C1234 | why |` and `| Must | C1141, C1142 | why |`. A parser that
+knows one shape produces no session, or no run, **silently**. Match both, and when scope is
+genuinely ambiguous say so loudly rather than guessing.
+
 ## Never claim something is uncovered from `coverage.py area` alone
 
 `area` answers "what is filed here". It cannot answer "what tests this". Anything used as a
@@ -56,6 +85,18 @@ three were owned by QA-643 and QA-644, and the rest were answered by shipped cas
 
 ## House rules for drafted cases
 
+- **Area must name exactly one folder.** A bare name often does not: `Form Scan` is both
+  `App Scanning/Imaging > Form Scan` and `App Scanning/Imaging (Autoscan) > Form Scan`,
+  and Suite does not disambiguate them because it is a template field, not folder
+  structure. When a name is ambiguous, write the full path:
+  `- **Area:** App Scanning/Imaging (Autoscan) > Form Scan`. File a new case where its
+  siblings already live. `validate_cases.py` now fails on an ambiguous Area, so this is
+  caught before review rather than at import.
+- **Status is always `Claude - Needs Review`, never `In Use`.** `In Use` is what the
+  team's vetted cases carry; a case drafted minutes ago has not earned it, and the status
+  is the only thing in the repository that says who wrote it. A lead promotes it by hand
+  after it runs on a device. Nothing in this loop promotes it. `coverage.py` therefore
+  counts these as unrunnable rather than as coverage, which is intended.
 - **Platform comes from the ticket's Linear label**, never inferred per case. It rides to
   Linear as a label; `02-cases.md` keeps the `OS:` line because Testmo import needs it.
 - **Config only when exclusive to one form factor.** Absent means all.
